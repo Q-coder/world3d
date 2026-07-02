@@ -1,0 +1,15 @@
+; Engine configuration file.
+; Double-precision Godot 4.7 build required.
+
+config_version=5
+
+[application]
+
+config/name="World3D Demo"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.7", "Double Precision")
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=900

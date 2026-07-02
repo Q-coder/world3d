@@ -1,0 +1,23 @@
+*.os
+*.obj
+*.o
+*.dylib
+*.so
+*.dll
+*.dblite
+*.pyc
+__pycache__/
+.DS_Store
+
+# Build artifacts (keep the .gdextension file, ignore compiled libs)
+demo/bin/*.dylib
+demo/bin/*.so
+demo/bin/*.dll
+
+# Godot editor cache
+demo/.godot/
+
+# Downloaded / baked terrain data
+data/
+demo/faces/
+earth_preview.png

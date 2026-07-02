@@ -1,0 +1,16 @@
+[configuration]
+
+entry_symbol = "world3d_library_init"
+compatibility_minimum = "4.3"
+reloadable = true
+
+[libraries]
+
+macos.debug = "res://bin/libworld3d.macos.template_debug.double.universal.dylib"
+macos.release = "res://bin/libworld3d.macos.template_release.double.universal.dylib"
+windows.debug.x86_64 = "res://bin/libworld3d.windows.template_debug.double.x86_64.dll"
+windows.release.x86_64 = "res://bin/libworld3d.windows.template_release.double.x86_64.dll"
+linux.debug.x86_64 = "res://bin/libworld3d.linux.template_debug.double.x86_64.so"
+linux.release.x86_64 = "res://bin/libworld3d.linux.template_release.double.x86_64.so"
+linux.debug.arm64 = "res://bin/libworld3d.linux.template_debug.double.arm64.so"
+linux.release.arm64 = "res://bin/libworld3d.linux.template_release.double.arm64.so"

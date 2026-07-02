@@ -1,0 +1,28 @@
+[gd_scene load_steps=3 format=3 uid="uid://bw0rld3ddemo01"]
+
+[ext_resource type="Script" path="res://orbit_camera.gd" id="1_orbit"]
+
+[sub_resource type="Environment" id="Env_1"]
+background_mode = 1
+background_color = Color(0.01, 0.01, 0.03, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.3, 0.32, 0.38, 1)
+ambient_light_energy = 0.4
+
+[node name="Main" type="Node3D"]
+
+[node name="World3D" type="W3DWorld" parent="."]
+
+[node name="Globe" type="W3DGlobe" parent="World3D"]
+faces_path = "res://faces"
+vertical_exaggeration = 1.0
+
+[node name="Camera3D" type="Camera3D" parent="."]
+script = ExtResource("1_orbit")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env_1")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.86, -0.25, 0.44, 0, 0.87, 0.5, -0.5, -0.43, 0.75, 0, 0, 0)
+light_energy = 1.2
