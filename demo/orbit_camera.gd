@@ -19,6 +19,10 @@ var _frames := 0
 func _ready() -> void:
 	near = 1000.0
 	far = 2.0e8
+	var d := OS.get_environment("W3D_DIST")
+	if d != "":
+		distance = float(d)
+		near = clamp(distance * 0.001, 10.0, 1000.0)
 	_update_transform()
 
 func _unhandled_input(event: InputEvent) -> void:

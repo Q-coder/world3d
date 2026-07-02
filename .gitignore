@@ -20,4 +20,4 @@ demo/.godot/
 # Downloaded / baked terrain data
 data/
 demo/faces/
-earth_preview.png
+earth_*.png
