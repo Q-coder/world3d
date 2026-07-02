@@ -1,7 +1,8 @@
 extends Camera3D
 
-# Simple orbit camera for the static globe demo. The Earth is centred at the ECEF
-# origin (0,0,0) with radius ~6.378e6 m. Drag to rotate, wheel to zoom.
+# Turntable orbit camera for the globe demo. The Earth is centred at the ECEF
+# origin (0,0,0); ECEF +Z is the true north pole, so the camera keeps north up.
+# Left-drag grabs and rotates the globe; wheel zooms.
 
 const EARTH_R := 6378137.0
 
@@ -11,8 +12,9 @@ const EARTH_R := 6378137.0
 @export var auto_rotate := true
 @export var auto_rotate_speed := 0.05 # rad/s
 
-var _yaw := 0.6
-var _pitch := 0.4
+# _lon = longitude around the north (Z) axis, _lat = latitude from the equator.
+var _lon := 0.6
+var _lat := 0.4
 var _dragging := false
 var _frames := 0
 
@@ -68,8 +70,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			distance = min(max_distance, distance * 1.1)
 			_update_transform()
 	elif event is InputEventMouseMotion and _dragging:
-		_yaw -= event.relative.x * 0.005
-		_pitch = clamp(_pitch - event.relative.y * 0.005, -1.5, 1.5)
+		# Grab-style: the point under the cursor follows the mouse.
+		var k := distance / EARTH_R * 0.004 # scale sensitivity with zoom
+		k = clamp(k, 0.0015, 0.02)
+		_lon -= event.relative.x * k
+		_lat = clamp(_lat + event.relative.y * k, -1.4, 1.4)
 		_update_transform()
 
 func _process(delta: float) -> void:
@@ -79,7 +84,7 @@ func _process(delta: float) -> void:
 		# Ease toward the surface; keep rotating so new chunks stream in constantly.
 		distance = lerp(_fly_from, _fly_to, t * t)
 		near = clamp(distance * 0.001, 10.0, 1000.0)
-		_yaw += 0.15 * delta
+		_lon += 0.15 * delta
 		_update_transform()
 		# Skip the first few frames (initial load) before profiling.
 		if _fly_t > 0.5:
@@ -97,7 +102,7 @@ func _process(delta: float) -> void:
 		return
 
 	if auto_rotate:
-		_yaw += auto_rotate_speed * delta
+		_lon += auto_rotate_speed * delta
 		_update_transform()
 
 	# Opt-in one-shot screenshot for automated verification.
@@ -111,9 +116,10 @@ func _process(delta: float) -> void:
 			get_tree().quit()
 
 func _update_transform() -> void:
+	# Parameterise by geographic longitude/latitude so ECEF north (+Z) stays up.
 	var dir := Vector3(
-		cos(_pitch) * sin(_yaw),
-		sin(_pitch),
-		cos(_pitch) * cos(_yaw))
+		cos(_lat) * cos(_lon),
+		cos(_lat) * sin(_lon),
+		sin(_lat))
 	var pos := dir * distance
-	look_at_from_position(pos, Vector3.ZERO, Vector3.UP)
+	look_at_from_position(pos, Vector3.ZERO, Vector3(0, 0, 1))
