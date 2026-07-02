@@ -3,6 +3,7 @@
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
@@ -70,6 +71,15 @@ namespace world3d
 		ClassDB::bind_method(D_METHOD("set_lod_split_factor", "factor"), &W3DGlobe::set_lod_split_factor);
 		ClassDB::bind_method(D_METHOD("get_lod_split_factor"), &W3DGlobe::get_lod_split_factor);
 		ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "lod_split_factor"), "set_lod_split_factor", "get_lod_split_factor");
+
+		ClassDB::bind_method(D_METHOD("set_clamp_sea_level", "clamp"), &W3DGlobe::set_clamp_sea_level);
+		ClassDB::bind_method(D_METHOD("get_clamp_sea_level"), &W3DGlobe::get_clamp_sea_level);
+		ADD_PROPERTY(PropertyInfo(Variant::BOOL, "clamp_sea_level"), "set_clamp_sea_level", "get_clamp_sea_level");
+
+		ClassDB::bind_method(D_METHOD("get_elevation", "latitude", "longitude"), &W3DGlobe::get_elevation);
+		ClassDB::bind_method(D_METHOD("get_ground_ecef", "latitude", "longitude"), &W3DGlobe::get_ground_ecef);
+		ClassDB::bind_method(D_METHOD("get_terrain_ecef_below", "ecef"), &W3DGlobe::get_terrain_ecef_below);
+		ClassDB::bind_method(D_METHOD("get_height_above_terrain", "ecef"), &W3DGlobe::get_height_above_terrain);
 	}
 
 	void W3DGlobe::_ready()
@@ -101,6 +111,28 @@ namespace world3d
 		UtilityFunctions::print("[world3d] W3DGlobe quadtree ready (face_size=", face_size,
 								", chunk_res=", chunk_resolution, ", max_level=", max_level,
 								", workers=", (int)workers.size(), ")");
+
+		if (OS::get_singleton()->get_environment("W3D_ELEVTEST") != String())
+		{
+			struct
+			{
+				const char *name;
+				double lat, lon;
+			} pts[] = {
+				{"Everest", 27.9881, 86.9250},
+				{"Bern", 46.9524, 7.4396},
+				{"Death Valley", 36.25, -116.82},
+				{"Mid-Pacific (ocean)", 0.0, -140.0},
+				{"Mariana Trench (ocean)", 11.35, 142.2},
+			};
+			for (auto &p : pts)
+			{
+				const double e = get_elevation(p.lat, p.lon);
+				const Vector3 g = get_ground_ecef(p.lat, p.lon);
+				const double agl = get_height_above_terrain(W3DCoords::geodetic_to_ecef(p.lat, p.lon, e + 1000.0));
+				UtilityFunctions::print("[world3d] ELEV ", p.name, ": ", e, " m ASL, ground_ecef=", g, ", AGL@+1000=", agl);
+			}
+		}
 	}
 
 	void W3DGlobe::_exit_tree()
@@ -228,13 +260,18 @@ namespace world3d
 		return (float)(top * (1 - fy) + bot * fy);
 	}
 
+	float W3DGlobe::terrain_height(float raw) const
+	{
+		return clamp_sea_level ? MAX(raw, 0.0f) : raw;
+	}
+
 	Vector3 W3DGlobe::ecef_at(int face, double u, double v) const
 	{
 		const Vector3 p = FACE_BASE[face] + FACE_U[face] * u + FACE_V[face] * v;
 		const Vector3 dir = p.normalized();
 		const double lat = Math::rad_to_deg(std::asin(CLAMP(dir.z, -1.0, 1.0)));
 		const double lon = Math::rad_to_deg(std::atan2(dir.y, dir.x));
-		const double h = (double)sample_face(face, u, v) * vertical_exaggeration;
+		const double h = (double)terrain_height(sample_face(face, u, v)) * vertical_exaggeration;
 		return W3DCoords::geodetic_to_ecef(lat, lon, h);
 	}
 
@@ -261,7 +298,7 @@ namespace world3d
 				const double lon = Math::rad_to_deg(std::atan2(dir.y, dir.x));
 				const float e = sample_face(req.face, u, v);
 				elev[j * R + i] = e;
-				pos[j * R + i] = W3DCoords::geodetic_to_ecef(lat, lon, (double)e * vertical_exaggeration);
+				pos[j * R + i] = W3DCoords::geodetic_to_ecef(lat, lon, (double)terrain_height(e) * vertical_exaggeration);
 			}
 		}
 
@@ -644,5 +681,58 @@ namespace world3d
 	int W3DGlobe::get_max_level() const { return max_level; }
 	void W3DGlobe::set_lod_split_factor(double p_factor) { lod_split_factor = MAX(0.1, p_factor); }
 	double W3DGlobe::get_lod_split_factor() const { return lod_split_factor; }
+	void W3DGlobe::set_clamp_sea_level(bool p_clamp) { clamp_sea_level = p_clamp; }
+	bool W3DGlobe::get_clamp_sea_level() const { return clamp_sea_level; }
+
+	double W3DGlobe::get_elevation(double latitude, double longitude) const
+	{
+		if (face_size < 2)
+		{
+			return 0.0;
+		}
+		const double la = Math::deg_to_rad(latitude);
+		const double lo = Math::deg_to_rad(longitude);
+		const double cla = std::cos(la);
+		// Geocentric unit direction (matches the baker's forward mapping).
+		const Vector3 dir(cla * std::cos(lo), cla * std::sin(lo), std::sin(la));
+
+		// Inverse cube map: the face is the one whose base axis dir points most
+		// toward; then u,v are the projections onto that face's axes.
+		int face = 0;
+		double best = -2.0;
+		for (int f = 0; f < 6; ++f)
+		{
+			const double d = dir.dot(FACE_BASE[f]);
+			if (d > best)
+			{
+				best = d;
+				face = f;
+			}
+		}
+		if (best <= 0.0)
+		{
+			return 0.0;
+		}
+		const double u = dir.dot(FACE_U[face]) / best;
+		const double v = dir.dot(FACE_V[face]) / best;
+		return (double)terrain_height(sample_face(face, u, v)) * vertical_exaggeration;
+	}
+
+	Vector3 W3DGlobe::get_ground_ecef(double latitude, double longitude) const
+	{
+		return W3DCoords::geodetic_to_ecef(latitude, longitude, get_elevation(latitude, longitude));
+	}
+
+	Vector3 W3DGlobe::get_terrain_ecef_below(Vector3 ecef) const
+	{
+		const Vector3 g = W3DCoords::ecef_to_geodetic(ecef); // (lat, lon, height)
+		return get_ground_ecef(g.x, g.y);
+	}
+
+	double W3DGlobe::get_height_above_terrain(Vector3 ecef) const
+	{
+		const Vector3 g = W3DCoords::ecef_to_geodetic(ecef); // (lat, lon, height)
+		return g.z - get_elevation(g.x, g.y);
+	}
 
 }

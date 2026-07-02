@@ -83,6 +83,7 @@ namespace world3d
 
 		godot::String faces_path = "res://faces";
 		double vertical_exaggeration = 1.0;
+		bool clamp_sea_level = true;   // render/query ocean as a flat shell at 0 m
 		int chunk_resolution = 33;     // vertices per chunk edge
 		int max_level = 6;
 		double lod_split_factor = 2.5; // split when dist < edge_len * factor
@@ -112,6 +113,7 @@ namespace world3d
 		bool load_faces();
 		void build_shared_indices();
 		float sample_face(int face, double u, double v) const;
+		float terrain_height(float raw) const; // applies sea-level clamp
 		godot::Vector3 ecef_at(int face, double u, double v) const;
 		void compute_chunk(const ChunkRequest &req, ChunkResult &out) const;
 		void worker_loop();
@@ -154,6 +156,23 @@ namespace world3d
 
 		void set_lod_split_factor(double p_factor);
 		double get_lod_split_factor() const;
+
+		void set_clamp_sea_level(bool p_clamp);
+		bool get_clamp_sea_level() const;
+
+		// --- Global terrain queries (for flight dynamics / ground contact) ---
+		// All work anywhere on the planet from the in-memory face grids, regardless
+		// of which chunks are currently meshed, and are O(1) and thread-safe.
+		//
+		// Terrain elevation (metres, incl. vertical_exaggeration and the sea-level
+		// clamp) at a WGS84 geodetic point. Matches the rendered surface exactly.
+		double get_elevation(double latitude, double longitude) const;
+		// ECEF point on the terrain surface at the given lat/lon.
+		godot::Vector3 get_ground_ecef(double latitude, double longitude) const;
+		// ECEF terrain point directly below an ECEF position (same lat/lon).
+		godot::Vector3 get_terrain_ecef_below(godot::Vector3 ecef) const;
+		// Height of an ECEF position above the terrain surface (AGL, metres).
+		double get_height_above_terrain(godot::Vector3 ecef) const;
 	};
 
 }
