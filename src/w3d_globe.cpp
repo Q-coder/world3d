@@ -39,7 +39,15 @@ namespace world3d
 		Vector3(0, 1, 0), Vector3(0, 1, 0)};
 
 	W3DGlobe::W3DGlobe() {}
-	W3DGlobe::~W3DGlobe() {}
+	W3DGlobe::~W3DGlobe()
+	{
+		stop_workers();
+		for (int f = 0; f < 6; ++f)
+		{
+			free_subtree(roots[f]);
+			roots[f] = nullptr;
+		}
+	}
 
 	void W3DGlobe::_bind_methods()
 	{
@@ -75,14 +83,35 @@ namespace world3d
 		{
 			return;
 		}
+		build_shared_indices();
+
+		chunk_material.instantiate();
+		chunk_material->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+		chunk_material->set_cull_mode(BaseMaterial3D::CULL_BACK);
+		chunk_material->set_roughness(1.0);
+		chunk_material->set_metallic(0.0);
+
+		start_workers();
 		for (int f = 0; f < 6; ++f)
 		{
 			roots[f] = make_node(f, 0, -1.0, -1.0, 1.0, 1.0);
-			build_mesh(roots[f]);
+			request_mesh(roots[f]);
 		}
 		set_process(true);
 		UtilityFunctions::print("[world3d] W3DGlobe quadtree ready (face_size=", face_size,
-								", chunk_res=", chunk_resolution, ", max_level=", max_level, ")");
+								", chunk_res=", chunk_resolution, ", max_level=", max_level,
+								", workers=", (int)workers.size(), ")");
+	}
+
+	void W3DGlobe::_exit_tree()
+	{
+		stop_workers();
+		for (int f = 0; f < 6; ++f)
+		{
+			free_subtree(roots[f]);
+			roots[f] = nullptr;
+		}
+		chunk_material.unref();
 	}
 
 	static Color color_for_elevation(float e)
@@ -153,6 +182,29 @@ namespace world3d
 		return true;
 	}
 
+	void W3DGlobe::build_shared_indices()
+	{
+		const int R = chunk_resolution;
+		shared_indices.resize((R - 1) * (R - 1) * 6);
+		int k = 0;
+		for (int j = 0; j < R - 1; ++j)
+		{
+			for (int i = 0; i < R - 1; ++i)
+			{
+				const int a = j * R + i;
+				const int b = j * R + (i + 1);
+				const int c = (j + 1) * R + i;
+				const int d = (j + 1) * R + (i + 1);
+				shared_indices[k++] = a;
+				shared_indices[k++] = c;
+				shared_indices[k++] = b;
+				shared_indices[k++] = b;
+				shared_indices[k++] = c;
+				shared_indices[k++] = d;
+			}
+		}
+	}
+
 	float W3DGlobe::sample_face(int face, double u, double v) const
 	{
 		// (u,v) in [-1,1] -> grid coords. i indexes u, j indexes v (matches baker).
@@ -186,57 +238,37 @@ namespace world3d
 		return W3DCoords::geodetic_to_ecef(lat, lon, h);
 	}
 
-	W3DGlobe::QuadNode *W3DGlobe::make_node(int face, int level, double u0, double v0, double u1, double v1)
-	{
-		QuadNode *n = new QuadNode();
-		n->face = face;
-		n->level = level;
-		n->u0 = u0;
-		n->v0 = v0;
-		n->u1 = u1;
-		n->v1 = v1;
-		n->center_ecef = ecef_at(face, 0.5 * (u0 + u1), 0.5 * (v0 + v1));
-		const Vector3 c00 = ecef_at(face, u0, v0);
-		const Vector3 c10 = ecef_at(face, u1, v0);
-		const Vector3 c11 = ecef_at(face, u1, v1);
-		n->edge_len = c00.distance_to(c10);
-		n->bound_radius = MAX(n->center_ecef.distance_to(c00), n->center_ecef.distance_to(c11));
-		return n;
-	}
-
-	void W3DGlobe::build_mesh(QuadNode *node)
+	// Pure compute — safe to run on a worker thread (reads immutable face grids).
+	void W3DGlobe::compute_chunk(const ChunkRequest &req, ChunkResult &out) const
 	{
 		const int R = chunk_resolution;
 		const int vcount = R * R;
-		const Vector3 origin = node->center_ecef;
+		const Vector3 origin = req.origin;
 
 		std::vector<Vector3> pos(vcount);
 		std::vector<float> elev(vcount);
 		for (int j = 0; j < R; ++j)
 		{
 			const double tv = (double)j / (double)(R - 1);
-			const double v = node->v0 + (node->v1 - node->v0) * tv;
+			const double v = req.v0 + (req.v1 - req.v0) * tv;
 			for (int i = 0; i < R; ++i)
 			{
 				const double tu = (double)i / (double)(R - 1);
-				const double u = node->u0 + (node->u1 - node->u0) * tu;
-				const Vector3 p = FACE_BASE[node->face] + FACE_U[node->face] * u + FACE_V[node->face] * v;
+				const double u = req.u0 + (req.u1 - req.u0) * tu;
+				const Vector3 p = FACE_BASE[req.face] + FACE_U[req.face] * u + FACE_V[req.face] * v;
 				const Vector3 dir = p.normalized();
 				const double lat = Math::rad_to_deg(std::asin(CLAMP(dir.z, -1.0, 1.0)));
 				const double lon = Math::rad_to_deg(std::atan2(dir.y, dir.x));
-				const float e = sample_face(node->face, u, v);
+				const float e = sample_face(req.face, u, v);
 				elev[j * R + i] = e;
 				pos[j * R + i] = W3DCoords::geodetic_to_ecef(lat, lon, (double)e * vertical_exaggeration);
 			}
 		}
 
-		PackedVector3Array vertices;
-		PackedVector3Array normals;
-		PackedColorArray colors;
-		vertices.resize(vcount);
-		normals.resize(vcount);
-		colors.resize(vcount);
-
+		out.id = req.id;
+		out.vertices.resize(vcount);
+		out.normals.resize(vcount);
+		out.colors.resize(vcount);
 		for (int j = 0; j < R; ++j)
 		{
 			for (int i = 0; i < R; ++i)
@@ -261,58 +293,178 @@ namespace world3d
 						n = -n;
 					}
 				}
-				vertices[idx] = pos[idx] - origin; // local to chunk centre
-				normals[idx] = n;
-				colors[idx] = color_for_elevation(elev[idx]);
+				out.vertices[idx] = pos[idx] - origin; // local to chunk centre
+				out.normals[idx] = n;
+				out.colors[idx] = color_for_elevation(elev[idx]);
 			}
 		}
+	}
 
-		PackedInt32Array indices;
-		indices.resize((R - 1) * (R - 1) * 6);
-		int k = 0;
-		for (int j = 0; j < R - 1; ++j)
+	void W3DGlobe::worker_loop()
+	{
+		for (;;)
 		{
-			for (int i = 0; i < R - 1; ++i)
+			ChunkRequest req;
 			{
-				const int a = j * R + i;
-				const int b = j * R + (i + 1);
-				const int c = (j + 1) * R + i;
-				const int d = (j + 1) * R + (i + 1);
-				indices[k++] = a;
-				indices[k++] = c;
-				indices[k++] = b;
-				indices[k++] = b;
-				indices[k++] = c;
-				indices[k++] = d;
+				std::unique_lock<std::mutex> lock(req_mutex);
+				req_cv.wait(lock, [this]
+							{ return stop_threads.load() || !requests.empty(); });
+				if (stop_threads.load() && requests.empty())
+				{
+					return;
+				}
+				req = requests.front();
+				requests.pop_front();
 			}
+			ChunkResult res;
+			compute_chunk(req, res);
+			{
+				std::lock_guard<std::mutex> lock(res_mutex);
+				results.push_back(std::move(res));
+			}
+		}
+	}
+
+	void W3DGlobe::start_workers()
+	{
+		if (!workers.empty())
+		{
+			return;
+		}
+		unsigned hc = std::thread::hardware_concurrency();
+		int n = (int)(hc > 2 ? hc - 1 : 2);
+		if (n > 4)
+		{
+			n = 4;
+		}
+		stop_threads.store(false);
+		for (int i = 0; i < n; ++i)
+		{
+			workers.emplace_back(&W3DGlobe::worker_loop, this);
+		}
+	}
+
+	void W3DGlobe::stop_workers()
+	{
+		if (workers.empty())
+		{
+			return;
+		}
+		stop_threads.store(true);
+		req_cv.notify_all();
+		for (std::thread &t : workers)
+		{
+			if (t.joinable())
+			{
+				t.join();
+			}
+		}
+		workers.clear();
+		{
+			std::lock_guard<std::mutex> lock(req_mutex);
+			requests.clear();
+		}
+		{
+			std::lock_guard<std::mutex> lock(res_mutex);
+			results.clear();
+		}
+	}
+
+	W3DGlobe::QuadNode *W3DGlobe::make_node(int face, int level, double u0, double v0, double u1, double v1)
+	{
+		QuadNode *n = new QuadNode();
+		n->id = next_id++;
+		n->face = face;
+		n->level = level;
+		n->u0 = u0;
+		n->v0 = v0;
+		n->u1 = u1;
+		n->v1 = v1;
+		n->center_ecef = ecef_at(face, 0.5 * (u0 + u1), 0.5 * (v0 + v1));
+		const Vector3 c00 = ecef_at(face, u0, v0);
+		const Vector3 c10 = ecef_at(face, u1, v0);
+		const Vector3 c11 = ecef_at(face, u1, v1);
+		n->edge_len = c00.distance_to(c10);
+		n->bound_radius = MAX(n->center_ecef.distance_to(c00), n->center_ecef.distance_to(c11));
+		live_nodes[n->id] = n;
+		return n;
+	}
+
+	void W3DGlobe::request_mesh(QuadNode *node)
+	{
+		if (node->mesh || node->mesh_requested)
+		{
+			return;
+		}
+		node->mesh_requested = true;
+		ChunkRequest req;
+		req.id = node->id;
+		req.face = node->face;
+		req.u0 = node->u0;
+		req.v0 = node->v0;
+		req.u1 = node->u1;
+		req.v1 = node->v1;
+		req.origin = node->center_ecef;
+		{
+			std::lock_guard<std::mutex> lock(req_mutex);
+			requests.push_back(req);
+		}
+		req_cv.notify_one();
+	}
+
+	void W3DGlobe::commit_result(const ChunkResult &res)
+	{
+		auto it = live_nodes.find(res.id);
+		if (it == live_nodes.end())
+		{
+			return; // node was freed while its mesh was in flight
+		}
+		QuadNode *node = it->second;
+		if (node->mesh)
+		{
+			return;
 		}
 
 		Array arrays;
 		arrays.resize(Mesh::ARRAY_MAX);
-		arrays[Mesh::ARRAY_VERTEX] = vertices;
-		arrays[Mesh::ARRAY_NORMAL] = normals;
-		arrays[Mesh::ARRAY_COLOR] = colors;
-		arrays[Mesh::ARRAY_INDEX] = indices;
+		arrays[Mesh::ARRAY_VERTEX] = res.vertices;
+		arrays[Mesh::ARRAY_NORMAL] = res.normals;
+		arrays[Mesh::ARRAY_COLOR] = res.colors;
+		arrays[Mesh::ARRAY_INDEX] = shared_indices;
 
 		Ref<ArrayMesh> mesh;
 		mesh.instantiate();
 		mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
-		Ref<StandardMaterial3D> mat;
-		mat.instantiate();
-		mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
-		mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
-		mat->set_roughness(1.0);
-		mat->set_metallic(0.0);
-
 		MeshInstance3D *mi = memnew(MeshInstance3D);
 		mi->set_name("F" + String::num_int64(node->face) + "L" + String::num_int64(node->level));
 		mi->set_mesh(mesh);
-		mi->set_material_override(mat);
+		mi->set_material_override(chunk_material);
+		mi->set_visible(false); // visibility decided by the LOD traversal
 		add_child(mi);
-		mi->set_position(origin); // double-precision chunk origin
+		mi->set_position(node->center_ecef); // double-precision chunk origin
 		node->mesh = mi;
-		builds_this_frame++;
+		node->mesh_requested = false;
+	}
+
+	void W3DGlobe::drain_results()
+	{
+		int committed = 0;
+		while (committed < commit_budget)
+		{
+			ChunkResult res;
+			{
+				std::lock_guard<std::mutex> lock(res_mutex);
+				if (results.empty())
+				{
+					break;
+				}
+				res = std::move(results.front());
+				results.pop_front();
+			}
+			commit_result(res);
+			committed++;
+		}
 	}
 
 	void W3DGlobe::free_subtree(QuadNode *node)
@@ -326,6 +478,7 @@ namespace world3d
 			free_subtree(node->children[i]);
 			node->children[i] = nullptr;
 		}
+		live_nodes.erase(node->id);
 		if (node->mesh)
 		{
 			node->mesh->queue_free();
@@ -358,25 +511,59 @@ namespace world3d
 		node->children[3] = make_node(node->face, node->level + 1, um, vm, node->u1, node->v1);
 		for (int i = 0; i < 4; ++i)
 		{
-			build_mesh(node->children[i]);
+			request_mesh(node->children[i]);
 		}
 		node->has_children = true;
 	}
 
-	void W3DGlobe::set_subtree_visible(QuadNode *node, bool visible)
+	bool W3DGlobe::beyond_horizon(const QuadNode *node, const Vector3 &cam_ecef) const
 	{
-		if (!node)
+		const double R = 6371000.0; // mean Earth radius
+		const double cam_r = cam_ecef.length();
+		if (cam_r <= R * 1.001)
 		{
-			return;
+			return false; // near/at surface: nothing culled by horizon
 		}
-		if (node->mesh)
+		const Vector3 cam_hat = cam_ecef / cam_r;
+		const Vector3 c_hat = node->center_ecef.normalized();
+		const double cap = std::acos(CLAMP(R / cam_r, -1.0, 1.0)); // visible cap half-angle
+		const double ang = std::acos(CLAMP(cam_hat.dot(c_hat), -1.0, 1.0));
+		const double node_ang = node->bound_radius / R + 0.08; // generous margin
+		return (ang - node_ang) > cap;
+	}
+
+	bool W3DGlobe::children_ready(QuadNode *node) const
+	{
+		// A child counts as ready if it has a committed mesh. (Horizon-culled
+		// children are handled during recursion, so we still require their mesh
+		// only if they might be shown; here we simply require all four meshes.)
+		for (int i = 0; i < 4; ++i)
 		{
-			node->mesh->set_visible(visible);
+			if (!node->children[i]->mesh)
+			{
+				return false;
+			}
 		}
+		return true;
 	}
 
 	void W3DGlobe::update_node(QuadNode *node, const Vector3 &cam_ecef)
 	{
+		if (beyond_horizon(node, cam_ecef))
+		{
+			if (node->has_children)
+			{
+				collapse(node);
+			}
+			if (node->mesh)
+			{
+				node->mesh->set_visible(false);
+			}
+			return;
+		}
+
+		request_mesh(node); // ensure this node has (or is building) its own mesh
+
 		double dist = cam_ecef.distance_to(node->center_ecef) - node->bound_radius;
 		if (dist < 1.0)
 		{
@@ -388,24 +575,26 @@ namespace world3d
 		{
 			if (!node->has_children)
 			{
-				if (builds_this_frame >= build_budget)
-				{
-					// Budget exhausted: keep this node visible this frame.
-					if (node->mesh)
-					{
-						node->mesh->set_visible(true);
-					}
-					return;
-				}
 				split(node);
 			}
-			if (node->mesh)
+			if (children_ready(node))
 			{
-				node->mesh->set_visible(false);
+				if (node->mesh)
+				{
+					node->mesh->set_visible(false);
+				}
+				for (int i = 0; i < 4; ++i)
+				{
+					update_node(node->children[i], cam_ecef);
+				}
 			}
-			for (int i = 0; i < 4; ++i)
+			else
 			{
-				update_node(node->children[i], cam_ecef);
+				// Seamless: keep the parent visible until every child is ready.
+				if (node->mesh)
+				{
+					node->mesh->set_visible(true);
+				}
 			}
 		}
 		else
@@ -427,6 +616,8 @@ namespace world3d
 		{
 			return;
 		}
+		drain_results(); // commit finished meshes (budgeted GPU upload)
+
 		Viewport *vp = get_viewport();
 		Camera3D *cam = vp ? vp->get_camera_3d() : nullptr;
 		if (!cam)
@@ -434,7 +625,6 @@ namespace world3d
 			return;
 		}
 		const Vector3 cam_ecef = to_local(cam->get_global_position());
-		builds_this_frame = 0;
 		for (int f = 0; f < 6; ++f)
 		{
 			if (roots[f])

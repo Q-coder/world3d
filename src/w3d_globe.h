@@ -2,10 +2,21 @@
 #define W3D_GLOBE_H
 
 #include <godot_cpp/classes/node3d.hpp>
+#include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/vector3.hpp>
+#include <godot_cpp/variant/packed_vector3_array.hpp>
+#include <godot_cpp/variant/packed_color_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 
 #include <vector>
+#include <deque>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <unordered_map>
+#include <cstdint>
 
 namespace godot
 {
@@ -15,15 +26,20 @@ namespace godot
 namespace world3d
 {
 
-	// Cube-sphere quadtree Earth (milestone 3). Each cube face is the root of a
-	// quadtree; a node splits into four children when the camera gets close
-	// relative to the node's edge length, and collapses when it moves away.
+	// Cube-sphere quadtree Earth. Each cube face is the root of a quadtree; a node
+	// splits into four children when the camera gets close relative to the node's
+	// edge length, and collapses when it moves away.
 	//
 	// Each chunk mesh is built with its vertices RELATIVE to the chunk's ECEF
 	// centre, and the owning MeshInstance3D carries that centre in its (double)
 	// transform. This keeps per-vertex magnitudes small so the float32 GPU vertex
 	// buffer stays precise right down at the surface — the prerequisite for
 	// close-up ECEF flight.
+	//
+	// For smooth flight the heavy per-vertex maths runs on a background worker
+	// pool; the main thread only commits finished vertex buffers to the GPU (a few
+	// per frame) and toggles visibility. Splits keep the parent visible until all
+	// four children are ready, so the surface never shows a hole.
 	//
 	// Elevation is sampled from the six baked ETOPO face grids held in memory.
 	// The cube mapping must match tools/bake_faces.py.
@@ -34,6 +50,7 @@ namespace world3d
 	private:
 		struct QuadNode
 		{
+			uint64_t id = 0;
 			int face = 0;
 			int level = 0;
 			double u0 = -1.0, v0 = -1.0, u1 = 1.0, v1 = 1.0;
@@ -41,33 +58,75 @@ namespace world3d
 			double edge_len = 0.0;      // approx ECEF edge length (metres)
 			double bound_radius = 0.0;  // bounding-sphere radius about centre
 			godot::MeshInstance3D *mesh = nullptr;
+			bool mesh_requested = false;
 			QuadNode *children[4] = {nullptr, nullptr, nullptr, nullptr};
 			bool has_children = false;
 		};
 
+		// A meshing job sent to a worker thread (carries only plain data).
+		struct ChunkRequest
+		{
+			uint64_t id = 0;
+			int face = 0;
+			double u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+			godot::Vector3 origin;
+		};
+
+		// A finished vertex buffer returned by a worker thread.
+		struct ChunkResult
+		{
+			uint64_t id = 0;
+			godot::PackedVector3Array vertices;
+			godot::PackedVector3Array normals;
+			godot::PackedColorArray colors;
+		};
+
 		godot::String faces_path = "res://faces";
 		double vertical_exaggeration = 1.0;
-		int chunk_resolution = 33; // vertices per chunk edge
+		int chunk_resolution = 33;     // vertices per chunk edge
 		int max_level = 6;
 		double lod_split_factor = 2.5; // split when dist < edge_len * factor
-		int build_budget = 12;         // max chunk builds per frame
+		int commit_budget = 6;         // finished meshes committed to GPU per frame
 
 		int face_size = 0;
 		std::vector<float> face_grid[6];
 		QuadNode *roots[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 		bool ready = false;
-		int builds_this_frame = 0;
+
+		// Shared triangle topology (identical for every chunk of this resolution).
+		godot::PackedInt32Array shared_indices;
+		// Shared material for every chunk (released in _exit_tree).
+		godot::Ref<godot::StandardMaterial3D> chunk_material;
+
+		// Background meshing pool.
+		std::vector<std::thread> workers;
+		std::mutex req_mutex;
+		std::condition_variable req_cv;
+		std::deque<ChunkRequest> requests;
+		std::mutex res_mutex;
+		std::deque<ChunkResult> results;
+		std::atomic<bool> stop_threads{false};
+		std::unordered_map<uint64_t, QuadNode *> live_nodes;
+		uint64_t next_id = 1;
 
 		bool load_faces();
+		void build_shared_indices();
 		float sample_face(int face, double u, double v) const;
 		godot::Vector3 ecef_at(int face, double u, double v) const;
+		void compute_chunk(const ChunkRequest &req, ChunkResult &out) const;
+		void worker_loop();
+		void start_workers();
+		void stop_workers();
 
 		QuadNode *make_node(int face, int level, double u0, double v0, double u1, double v1);
-		void build_mesh(QuadNode *node);
+		void request_mesh(QuadNode *node);
+		void commit_result(const ChunkResult &res);
+		void drain_results();
 		void free_subtree(QuadNode *node);
 		void collapse(QuadNode *node);
 		void split(QuadNode *node);
-		void set_subtree_visible(QuadNode *node, bool visible);
+		bool children_ready(QuadNode *node) const;
+		bool beyond_horizon(const QuadNode *node, const godot::Vector3 &cam_ecef) const;
 		void update_node(QuadNode *node, const godot::Vector3 &cam_ecef);
 
 	protected:
@@ -79,6 +138,7 @@ namespace world3d
 
 		void _ready() override;
 		void _process(double delta) override;
+		void _exit_tree() override;
 
 		void set_faces_path(const godot::String &p_path);
 		godot::String get_faces_path() const;
