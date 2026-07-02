@@ -40,6 +40,20 @@ func _ready() -> void:
 		distance = _fly_from
 		Engine.max_fps = 0
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+	if OS.get_environment("W3D_VIEW") == "bern":
+		# Look straight down the Bern direction so Switzerland is centred, with
+		# Earth's north up — used to verify the tangent patch lands correctly.
+		auto_rotate = false
+		var lat := deg_to_rad(46.9524)
+		var lon := deg_to_rad(7.4396)
+		var dir := Vector3(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat))
+		var vd := 1.4e7
+		var dd := OS.get_environment("W3D_DIST")
+		if dd != "":
+			vd = float(dd)
+		near = clamp(vd * 0.001, 10.0, 1000.0)
+		look_at_from_position(dir * vd, Vector3.ZERO, Vector3(0, 0, 1))
+		return
 	_update_transform()
 
 func _unhandled_input(event: InputEvent) -> void:

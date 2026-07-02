@@ -7,6 +7,7 @@
 #include "world3d.h"
 #include "w3d_coords.h"
 #include "w3d_globe.h"
+#include "w3d_tangent_anchor.h"
 
 using namespace godot;
 
@@ -19,6 +20,7 @@ void initialize_world3d_module(godot::ModuleInitializationLevel p_level)
 	ClassDB::register_class<world3d::W3DWorld>();
 	ClassDB::register_class<world3d::W3DCoords>();
 	ClassDB::register_class<world3d::W3DGlobe>();
+	ClassDB::register_class<world3d::W3DTangentAnchor>();
 }
 
 void uninitialize_world3d_module(godot::ModuleInitializationLevel p_level)

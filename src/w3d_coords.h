@@ -46,14 +46,19 @@ namespace world3d
 		// i.e. the outward ellipsoid surface normal at that point.
 		static godot::Vector3 geodetic_normal(double latitude, double longitude);
 
-		// --- ENU tangent frame ---
-		// Builds the transform that maps a local ENU frame (X=East, Y=Up, Z=North
-		// in metres, origin at the given geodetic point) into ECEF. Use this as the
-		// Transform3D of the child node hosting a flat local tile system.
+		// --- Local tangent frame (ENU-family) ---
+		// Builds the transform mapping a flat local Y-up frame at the given geodetic
+		// point into ECEF. Use it as the Transform3D of a child node hosting a flat
+		// local tile system (e.g. the scenery3d Swiss LV95 tiles).
 		//
-		// Note: the returned basis maps local (East, Up, North) axes so it lines up
-		// with a Y-up local scene where +X points East and +Z points North.
-		static godot::Transform3D enu_to_ecef_transform(double latitude, double longitude, double height);
+		// A geographic (East, North, Up) triad is right-handed in the order E,N,U,
+		// so assigning (East, Up, North) directly to a Y-up (X,Y,Z) frame would be
+		// left-handed and mirror any mounted geometry. To stay a proper rotation we
+		// therefore offer two right-handed conventions:
+		//   x_axis_west = false -> +X=East,  +Y=Up, +Z=South (North = -Z)
+		//   x_axis_west = true  -> +X=West,  +Y=Up, +Z=North   (scenery3d LV95 convention)
+		// Both have determinant +1, so triangle winding is preserved.
+		static godot::Transform3D enu_to_ecef_transform(double latitude, double longitude, double height, bool x_axis_west = false);
 	};
 
 }

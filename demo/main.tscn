@@ -1,4 +1,4 @@
-[gd_scene load_steps=3 format=3 uid="uid://bw0rld3ddemo01"]
+[gd_scene load_steps=5 format=3 uid="uid://bw0rld3ddemo01"]
 
 [ext_resource type="Script" path="res://orbit_camera.gd" id="1_orbit"]
 
@@ -9,6 +9,12 @@ ambient_light_source = 2
 ambient_light_color = Color(0.3, 0.32, 0.38, 1)
 ambient_light_energy = 0.4
 
+[sub_resource type="BoxMesh" id="Box_patch"]
+size = Vector3(600000, 4000, 600000)
+
+[sub_resource type="StandardMaterial3D" id="Mat_patch"]
+albedo_color = Color(0.95, 0.5, 0.1, 1)
+
 [node name="Main" type="Node3D"]
 
 [node name="World3D" type="W3DWorld" parent="."]
@@ -16,6 +22,14 @@ ambient_light_energy = 0.4
 [node name="Globe" type="W3DGlobe" parent="World3D"]
 faces_path = "res://faces"
 vertical_exaggeration = 1.0
+
+[node name="SwissAnchor" type="W3DTangentAnchor" parent="World3D"]
+active_radius = 1.0e7
+
+[node name="Patch" type="MeshInstance3D" parent="World3D/SwissAnchor"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2500, 0)
+mesh = SubResource("Box_patch")
+surface_material_override/0 = SubResource("Mat_patch")
 
 [node name="Camera3D" type="Camera3D" parent="."]
 script = ExtResource("1_orbit")

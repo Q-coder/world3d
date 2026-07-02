@@ -21,7 +21,7 @@ namespace world3d
 		ClassDB::bind_static_method("W3DCoords", D_METHOD("geodetic_to_ecef", "latitude", "longitude", "height"), &W3DCoords::geodetic_to_ecef);
 		ClassDB::bind_static_method("W3DCoords", D_METHOD("ecef_to_geodetic", "ecef"), &W3DCoords::ecef_to_geodetic);
 		ClassDB::bind_static_method("W3DCoords", D_METHOD("geodetic_normal", "latitude", "longitude"), &W3DCoords::geodetic_normal);
-		ClassDB::bind_static_method("W3DCoords", D_METHOD("enu_to_ecef_transform", "latitude", "longitude", "height"), &W3DCoords::enu_to_ecef_transform);
+		ClassDB::bind_static_method("W3DCoords", D_METHOD("enu_to_ecef_transform", "latitude", "longitude", "height", "x_axis_west"), &W3DCoords::enu_to_ecef_transform, DEFVAL(false));
 	}
 
 	static inline double deg2rad(double d) { return d * (Math_PI / 180.0); }
@@ -77,7 +77,7 @@ namespace world3d
 		return Vector3(cos_lat * std::cos(lon), cos_lat * std::sin(lon), std::sin(lat)).normalized();
 	}
 
-	Transform3D W3DCoords::enu_to_ecef_transform(double latitude, double longitude, double height)
+	Transform3D W3DCoords::enu_to_ecef_transform(double latitude, double longitude, double height, bool x_axis_west)
 	{
 		const double lat = deg2rad(latitude);
 		const double lon = deg2rad(longitude);
@@ -86,16 +86,30 @@ namespace world3d
 		const double sin_lon = std::sin(lon);
 		const double cos_lon = std::cos(lon);
 
-		// ENU basis vectors expressed in ECEF.
+		// Geographic basis vectors expressed in ECEF (E, N, U is right-handed).
 		const Vector3 east(-sin_lon, cos_lon, 0.0);
 		const Vector3 north(-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat);
 		const Vector3 up(cos_lat * cos_lon, cos_lat * sin_lon, sin_lat);
 
 		const Vector3 origin = geodetic_to_ecef(latitude, longitude, height);
 
-		// Local scene axes: +X = East, +Y = Up, +Z = North.
-		// Basis columns are the images of the local (X, Y, Z) axes in ECEF.
-		Basis basis(east, up, north);
+		// Build a proper right-handed (det +1) Y-up basis. The columns are the
+		// images of the local (X, Y, Z) axes in ECEF.
+		Basis basis;
+		if (x_axis_west)
+		{
+			// +X=West, +Y=Up, +Z=North (scenery3d LV95 convention). West x Up = North.
+			basis.set_column(0, -east);
+			basis.set_column(1, up);
+			basis.set_column(2, north);
+		}
+		else
+		{
+			// +X=East, +Y=Up, +Z=South. East x Up = -North = South.
+			basis.set_column(0, east);
+			basis.set_column(1, up);
+			basis.set_column(2, -north);
+		}
 		return Transform3D(basis, origin);
 	}
 
