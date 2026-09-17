@@ -76,6 +76,11 @@ namespace world3d
 		ClassDB::bind_method(D_METHOD("get_clamp_sea_level"), &W3DGlobe::get_clamp_sea_level);
 		ADD_PROPERTY(PropertyInfo(Variant::BOOL, "clamp_sea_level"), "set_clamp_sea_level", "get_clamp_sea_level");
 
+		ClassDB::bind_method(D_METHOD("clear_suppress_rects"), &W3DGlobe::clear_suppress_rects);
+		ClassDB::bind_method(D_METHOD("add_suppress_rect", "x_min", "z_min", "x_max", "z_max"), &W3DGlobe::add_suppress_rect);
+		ClassDB::bind_method(D_METHOD("get_suppress_rect_count"), &W3DGlobe::get_suppress_rect_count);
+		ClassDB::bind_method(D_METHOD("suppresses_flat_point", "x", "z"), &W3DGlobe::suppresses_flat_point);
+
 		ClassDB::bind_method(D_METHOD("get_elevation", "latitude", "longitude"), &W3DGlobe::get_elevation);
 		ClassDB::bind_method(D_METHOD("get_ground_ecef", "latitude", "longitude"), &W3DGlobe::get_ground_ecef);
 		ClassDB::bind_method(D_METHOD("get_terrain_ecef_below", "ecef"), &W3DGlobe::get_terrain_ecef_below);
@@ -586,6 +591,26 @@ namespace world3d
 
 	void W3DGlobe::update_node(QuadNode *node, const Vector3 &cam_ecef)
 	{
+		if (!suppress_rects.empty())
+		{
+			// to_global() applies the GlobeMount ECEF->flat transform. The host
+			// updates the mount in its own _process (parent runs first), so the
+			// test sees the current mapping. Only x/z matter — y is ASL.
+			const Vector3 flat = to_global(node->center_ecef);
+			if (in_suppress_rects(flat.x, flat.z))
+			{
+				if (node->has_children)
+				{
+					collapse(node);
+				}
+				if (node->mesh)
+				{
+					node->mesh->set_visible(false);
+				}
+				return;
+			}
+		}
+
 		if (beyond_horizon(node, cam_ecef))
 		{
 			if (node->has_children)
@@ -683,6 +708,40 @@ namespace world3d
 	double W3DGlobe::get_lod_split_factor() const { return lod_split_factor; }
 	void W3DGlobe::set_clamp_sea_level(bool p_clamp) { clamp_sea_level = p_clamp; }
 	bool W3DGlobe::get_clamp_sea_level() const { return clamp_sea_level; }
+
+	void W3DGlobe::clear_suppress_rects()
+	{
+		suppress_rects.clear();
+	}
+
+	void W3DGlobe::add_suppress_rect(double x_min, double z_min, double x_max, double z_max)
+	{
+		SuppressRect r;
+		r.x0 = MIN(x_min, x_max);
+		r.x1 = MAX(x_min, x_max);
+		r.z0 = MIN(z_min, z_max);
+		r.z1 = MAX(z_min, z_max);
+		suppress_rects.push_back(r);
+	}
+
+	int W3DGlobe::get_suppress_rect_count() const { return (int)suppress_rects.size(); }
+
+	bool W3DGlobe::in_suppress_rects(double x, double z) const
+	{
+		for (const auto &r : suppress_rects)
+		{
+			if (x >= r.x0 && x <= r.x1 && z >= r.z0 && z <= r.z1)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool W3DGlobe::suppresses_flat_point(double x, double z) const
+	{
+		return in_suppress_rects(x, z);
+	}
 
 	double W3DGlobe::get_elevation(double latitude, double longitude) const
 	{

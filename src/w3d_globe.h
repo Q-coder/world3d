@@ -94,6 +94,13 @@ namespace world3d
 		QuadNode *roots[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 		bool ready = false;
 
+		// Axis-aligned suppression rectangles in the FLAT frame (XZ metres):
+		// regions where a detailed scenery patch is authoritative, so coarse
+		// globe chunks are culled there instead of rendering a second surface
+		// next to / above the fine patch. Static per session (region bboxes).
+		struct SuppressRect { double x0 = 0, z0 = 0, x1 = 0, z1 = 0; };
+		std::vector<SuppressRect> suppress_rects;
+
 		// Shared triangle topology (identical for every chunk of this resolution).
 		godot::PackedInt32Array shared_indices;
 		// Shared material for every chunk (released in _exit_tree).
@@ -129,6 +136,7 @@ namespace world3d
 		void split(QuadNode *node);
 		bool children_ready(QuadNode *node) const;
 		bool beyond_horizon(const QuadNode *node, const godot::Vector3 &cam_ecef) const;
+		bool in_suppress_rects(double x, double z) const;
 		void update_node(QuadNode *node, const godot::Vector3 &cam_ecef);
 
 	protected:
@@ -159,6 +167,15 @@ namespace world3d
 
 		void set_clamp_sea_level(bool p_clamp);
 		bool get_clamp_sea_level() const;
+
+		// --- Patch suppression (flat-frame XZ rectangles) ---
+		// Chunks whose ECEF centre projects (via the mount transform) inside
+		// any rectangle are culled in the LOD traversal. The host (ProVPilot)
+		// feeds one rectangle per enabled scenery region's terrain extent.
+		void clear_suppress_rects();
+		void add_suppress_rect(double x_min, double z_min, double x_max, double z_max);
+		int get_suppress_rect_count() const;
+		bool suppresses_flat_point(double x, double z) const;
 
 		// --- Global terrain queries (for flight dynamics / ground contact) ---
 		// All work anywhere on the planet from the in-memory face grids, regardless
