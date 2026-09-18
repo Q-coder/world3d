@@ -106,7 +106,8 @@ Environment test hooks (prefix the run command):
 
 | Var | Effect |
 |-----|--------|
-| `W3D_MASKTEST=1` | Upload a test coverage mask (a square over Switzerland) — the globe must show a hole there. |
+| `W3D_MASKTEST=1` | Upload a test coverage mask in ECEF XZ (checkerboard around Bern) — the globe must show holes there. |
+| `W3D_MASKTEST=2` | Same, but the mask is in **LV95 grid metres** (`set_coverage_mask_frame(1)`) — holes aligned with the Swiss grid. |
 | `W3D_DIST=<m>` | Camera distance from Earth centre. |
 | `W3D_VIEW=bern` | Look straight down over Switzerland, north up. |
 | `W3D_SHOT=<png>` | Render one frame to a PNG, then quit. |
@@ -150,10 +151,12 @@ could never be contained inside a ~220 km region rectangle reliably.
 
 | Method | Effect |
 |--------|--------|
-| `set_coverage_mask(cells, n, origin_x, origin_z, step_x, step_z)` | replace the mask (`cells` = n×n bytes, row = Z cell, column = X cell) |
+| `set_coverage_mask(cells, n, origin_x, origin_z, step_x, step_z)` | replace the mask (`cells` = n×n bytes, row = second-axis cell, column = first-axis cell) |
+| `set_coverage_mask_frame(frame)` | `0` (default): mask plane = the globe's parent-frame XZ; `1`: parent frame is ECEF and the shader projects each fragment ECEF → WGS84 → CH1903+ → **LV95 E/N** (rigorous Swiss oblique Mercator, vendored `s3d_proj.h`), so the mask is in LV95 grid metres while the globe sits at the ECEF origin |
 | `clear_coverage_mask()` | no mask — the globe renders everywhere |
 | `get_coverage_mask_size()` | n (0 when no mask) |
-| `suppresses_world_point(x, z)` | CPU mirror of the shader test (for host/tests) |
+| `suppresses_world_point(x, z)` | CPU mirror of the shader test in the mask plane (for host/tests) |
+| `suppresses_ecef_point(ecef)` | CPU mirror for frame 1 (ECEF point → LV95 → mask) |
 
 ### `W3DTangentAnchor` (Node3D)
 

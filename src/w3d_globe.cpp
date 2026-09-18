@@ -1,5 +1,6 @@
 #include "w3d_globe.h"
 #include "w3d_coords.h"
+#include "s3d_proj.h"
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/classes/engine.hpp>
@@ -55,30 +56,87 @@ namespace world3d
 
 	// Chunk material. Vertex colour = elevation ramp (see color_for_elevation);
 	// the coverage mask discards fragments where the host reports resident
-	// detailed geometry (see set_coverage_mask). world_xz is the position in
-	// the globe's parent frame: chunk vertices are float offsets from the
-	// chunk's double-precision centre, and MODEL_MATRIX carries that centre
-	// as a float approximation — sub-metre error at the magnitudes involved,
-	// negligible against multi-km mask cells.
+	// detailed geometry (see set_coverage_mask). world_pos is the position in
+	// the globe's parent frame (flat host frame, or ECEF itself in step C):
+	// chunk vertices are float offsets from the chunk's double-precision
+	// centre, and MODEL_MATRIX carries that centre as a float approximation —
+	// sub-metre error at the magnitudes involved (0.5 m at 6.4e6), negligible
+	// against 1 km mask cells; the in-shader LV95 projection keeps ~1 m.
 	static const char *CHUNK_SHADER = R"(
 shader_type spatial;
 render_mode cull_back;
 
 uniform bool mask_enabled = false;
+uniform int mask_frame = 0;         // 0 = parent-frame XZ, 1 = LV95 E/N from ECEF
 uniform int mask_size = 0;
 uniform vec2 mask_origin = vec2(0.0, 0.0);
 uniform vec2 mask_step = vec2(1.0, 1.0);
 uniform sampler2D coverage_mask : filter_nearest, repeat_disable;
 
-varying vec2 world_xz;
+varying vec3 world_pos;
+
+const float SW_PI = 3.14159265358979;
+// WGS84 / Bessel 1841 (see s3d_proj.h), CH1903+ datum shift, Swiss
+// oblique Mercator constants (precomputed in double).
+const float A_W = 6378137.0;
+const float E2_W = 0.00669437999014;
+const float A_B = 6377397.155;
+const float E2_B = 0.006674372230614;
+const vec3 CH_D = vec3(674.374, 15.056, 405.346);
+const float SW_E = 0.0816968312153;
+const float SW_R = 6378815.90365;
+const float SW_ALPHA = 1.00072913843;
+const float SW_SIN_B0 = 0.730254470523;
+const float SW_COS_B0 = 0.683175239803;
+const float SW_K = 0.00306673237727;
+const float SW_LON0 = 0.129845224143;
+
+// ECEF -> geodetic (lat, lon) in radians on an ellipsoid (a, e2).
+vec2 ecef_to_geodetic(vec3 p, float a, float e2) {
+	float lon = atan(p.y, p.x);
+	float r = length(p.xy);
+	float lat = atan(p.z, r * (1.0 - e2));
+	for (int i = 0; i < 4; i++) {
+		float s = sin(lat);
+		float N = a / sqrt(1.0 - e2 * s * s);
+		float h = r / cos(lat) - N;
+		lat = atan(p.z, r * (1.0 - e2 * N / (N + h)));
+	}
+	return vec2(lat, lon);
+}
+
+vec3 geodetic_to_ecef(float lat, float lon, float a, float e2) {
+	float s = sin(lat), c = cos(lat);
+	float N = a / sqrt(1.0 - e2 * s * s);
+	return vec3(N * c * cos(lon), N * c * sin(lon), N * (1.0 - e2) * s);
+}
+
+// WGS84 ECEF -> LV95 (E, N): datum shift to CH1903+ (Bessel), then the
+// swisstopo rigorous Swiss conformal cylindrical projection.
+vec2 ecef_to_lv95(vec3 p) {
+	vec2 ll_w = ecef_to_geodetic(p, A_W, E2_W);
+	vec3 pb = geodetic_to_ecef(ll_w.x, ll_w.y, A_W, E2_W) - CH_D;
+	vec2 ll = ecef_to_geodetic(pb, A_B, E2_B);
+	float phi = ll.x, lam = ll.y;
+	float sp = sin(phi);
+	float S = SW_ALPHA * log(tan(SW_PI / 4.0 + phi / 2.0)) - SW_ALPHA * SW_E / 2.0 * log((1.0 + SW_E * sp) / (1.0 - SW_E * sp)) + SW_K;
+	float b = 2.0 * (atan(exp(S)) - SW_PI / 4.0);
+	float l = SW_ALPHA * (lam - SW_LON0);
+	float lbar = atan(sin(l), SW_SIN_B0 * tan(b) + SW_COS_B0 * cos(l));
+	float sbbar = SW_COS_B0 * sin(b) - SW_SIN_B0 * cos(b) * cos(l);
+	float Y = SW_R * lbar;
+	float X = SW_R / 2.0 * log((1.0 + sbbar) / (1.0 - sbbar));
+	return vec2(Y + 2600000.0, X + 1200000.0);
+}
 
 void vertex() {
-	world_xz = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xz;
+	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 }
 
 void fragment() {
 	if (mask_enabled && mask_size > 0) {
-		vec2 c = (world_xz - mask_origin) / mask_step;
+		vec2 q = (mask_frame == 1) ? ecef_to_lv95(world_pos) : world_pos.xz;
+		vec2 c = (q - mask_origin) / mask_step;
 		if (c.x >= 0.0 && c.y >= 0.0 && c.x < float(mask_size) && c.y < float(mask_size)) {
 			if (texelFetch(coverage_mask, ivec2(int(c.x), int(c.y)), 0).r > 0.5) {
 				discard;
@@ -121,6 +179,9 @@ void fragment() {
 		ClassDB::bind_method(D_METHOD("clear_coverage_mask"), &W3DGlobe::clear_coverage_mask);
 		ClassDB::bind_method(D_METHOD("get_coverage_mask_size"), &W3DGlobe::get_coverage_mask_size);
 		ClassDB::bind_method(D_METHOD("suppresses_world_point", "x", "z"), &W3DGlobe::suppresses_world_point);
+		ClassDB::bind_method(D_METHOD("set_coverage_mask_frame", "frame"), &W3DGlobe::set_coverage_mask_frame);
+		ClassDB::bind_method(D_METHOD("get_coverage_mask_frame"), &W3DGlobe::get_coverage_mask_frame);
+		ClassDB::bind_method(D_METHOD("suppresses_ecef_point", "ecef"), &W3DGlobe::suppresses_ecef_point);
 
 		ClassDB::bind_method(D_METHOD("get_elevation", "latitude", "longitude"), &W3DGlobe::get_elevation);
 		ClassDB::bind_method(D_METHOD("get_ground_ecef", "latitude", "longitude"), &W3DGlobe::get_ground_ecef);
@@ -780,12 +841,32 @@ void fragment() {
 		const bool enabled = mask_n > 0 && mask_texture.is_valid();
 		chunk_material->set_shader_parameter("mask_enabled", enabled);
 		chunk_material->set_shader_parameter("mask_size", enabled ? mask_n : 0);
+		chunk_material->set_shader_parameter("mask_frame", mask_frame);
 		chunk_material->set_shader_parameter("mask_origin", Vector2(mask_origin_x, mask_origin_z));
 		chunk_material->set_shader_parameter("mask_step", Vector2(mask_step_x, mask_step_z));
 		if (enabled)
 		{
 			chunk_material->set_shader_parameter("coverage_mask", mask_texture);
 		}
+	}
+
+	void W3DGlobe::set_coverage_mask_frame(int p_frame)
+	{
+		mask_frame = CLAMP(p_frame, 0, 1);
+		push_mask_uniforms();
+	}
+
+	int W3DGlobe::get_coverage_mask_frame() const { return mask_frame; }
+
+	bool W3DGlobe::suppresses_ecef_point(Vector3 ecef) const
+	{
+		if (mask_frame != 1)
+		{
+			return suppresses_world_point(ecef.x, ecef.z);
+		}
+		const s3d::proj::LatLon ll = s3d::proj::ecef_to_geodetic(s3d::proj::WGS84, s3d::proj::XYZ{ecef.x, ecef.y, ecef.z});
+		const s3d::proj::EN en = s3d::proj::wgs84_to_lv95(ll.lat, ll.lon);
+		return suppresses_world_point(en.e, en.n);
 	}
 
 	bool W3DGlobe::suppresses_world_point(double x, double z) const

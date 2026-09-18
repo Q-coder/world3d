@@ -110,6 +110,14 @@ namespace world3d
 		int mask_n = 0;
 		double mask_origin_x = 0.0, mask_origin_z = 0.0;
 		double mask_step_x = 1.0, mask_step_z = 1.0;
+		// Mask frame: how a fragment position maps to the mask's 2D plane.
+		//   0 = FLAT: the globe's parent-frame XZ (host mounts the globe into a
+		//       flat tangent frame; design §9 pre-step-C).
+		//   1 = LV95: the parent frame IS ECEF; fragment ECEF -> WGS84 geodetic
+		//       -> CH1903+ -> Swiss oblique Mercator E/N in the shader, so the
+		//       mask is in LV95 grid metres (Scenery3D's tile grid) while the
+		//       globe sits at the ECEF origin (step C).
+		int mask_frame = 0;
 		godot::Ref<godot::ImageTexture> mask_texture;
 
 		// Shared triangle topology (identical for every chunk of this resolution).
@@ -190,8 +198,14 @@ namespace world3d
 			double origin_x, double origin_z, double step_x, double step_z);
 		void clear_coverage_mask();
 		int get_coverage_mask_size() const;
-		// CPU mirror of the shader test (for the host / smoke tests).
+		// 0 = flat parent-frame XZ (default), 1 = LV95 E/N computed from ECEF.
+		void set_coverage_mask_frame(int p_frame);
+		int get_coverage_mask_frame() const;
+		// CPU mirrors of the shader test (for the host / smoke tests): a point
+		// in the mask plane (flat XZ or LV95 E/N depending on the frame), or an
+		// ECEF point (frame 1 only).
 		bool suppresses_world_point(double x, double z) const;
+		bool suppresses_ecef_point(godot::Vector3 ecef) const;
 
 		// --- Global terrain queries (for flight dynamics / ground contact) ---
 		// All work anywhere on the planet from the in-memory face grids, regardless

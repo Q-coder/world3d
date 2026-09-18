@@ -42,7 +42,18 @@ func _ready() -> void:
 		distance = _fly_from
 		Engine.max_fps = 0
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
-	if OS.get_environment("W3D_MASKTEST") != "":
+	if OS.get_environment("W3D_MASKTEST") == "2":
+		# Step C check: mask in LV95 grid metres while the globe sits in ECEF —
+		# a 3x3 checkerboard of 300 km LV95 cells around Bern must show up as
+		# holes aligned with the Swiss grid (rotated vs ECEF axes).
+		var globe := get_node_or_null("../World3D/Globe")
+		if globe:
+			var cells := PackedByteArray([255, 0, 255,  0, 255, 0,  255, 0, 255])
+			var cell := 300000.0
+			globe.set_coverage_mask_frame(1)
+			globe.set_coverage_mask(cells, 3, 2600000.0 - 1.5 * cell, 1200000.0 - 1.5 * cell, cell, cell)
+			print("[demo] W3D_MASKTEST=2 LV95 mask uploaded; bern suppressed=", globe.suppresses_ecef_point(Vector3(4324840.06, 564737.18, 4638154.67)))
+	elif OS.get_environment("W3D_MASKTEST") != "":
 		# Verify the per-fragment coverage mask: a 3x3 checkerboard of 200 km
 		# cells in ECEF XZ centred on Bern must punch holes in the globe.
 		var globe := get_node_or_null("../World3D/Globe")
