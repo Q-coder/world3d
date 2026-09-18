@@ -106,6 +106,7 @@ Environment test hooks (prefix the run command):
 
 | Var | Effect |
 |-----|--------|
+| `W3D_MASKTEST=1` | Upload a test coverage mask (a square over Switzerland) — the globe must show a hole there. |
 | `W3D_DIST=<m>` | Camera distance from Earth centre. |
 | `W3D_VIEW=bern` | Look straight down over Switzerland, north up. |
 | `W3D_SHOT=<png>` | Render one frame to a PNG, then quit. |
@@ -131,29 +132,28 @@ face grids, independent of which chunks are meshed):
 | `get_terrain_ecef_below(ecef)` | ECEF surface point directly under an ECEF position |
 | `get_height_above_terrain(ecef)` | height above ground (AGL) in metres |
 
-Patch suppression — axis-aligned rectangles in the **flat frame** (the frame
-the globe is mounted into; XZ metres). A chunk is culled in the LOD traversal
-only when **all four of its ground corners** project (via the mount transform)
-into one rectangle — containment, not centre membership — so a culled chunk
-always sits fully under resident detailed geometry and no large inset is
-needed to avoid holes to space (chunks straddling a rectangle edge stay
-visible). This lets a detailed scenery patch own its footprint while the globe
-stays visible everywhere else. ProVPilot derives the rectangles from
-Scenery3D's **live tile/chunk residency**: the tile manager reports a per-cell
-coverage grid (chunk-aligned, around the camera); covered cells are merged
-into maximal rectangles, clipped to each enabled region's terrain extent and
-inset by a small margin — so the globe is culled only where detailed geometry
-actually exists and stays visible as the fallback while the streamer catches
-up (no holes to space during the intro zoom or after a teleport). Suppressed
-chunks near the camera still subdivide (the test runs after the split
-decision), so only leaf-size pieces are culled:
+Patch suppression — a **per-fragment coverage mask**. The host uploads one
+byte per cell of a square grid (nonzero = detailed scenery geometry is
+resident in that cell) together with the mapping from the globe's parent
+frame XZ (the frame the globe is mounted into) to cell coordinates
+(`cell = floor((xz - origin) / step)`, a negative step is fine when the host's
+axis runs opposite to the cell index). The chunk shader discards fragments in
+covered cells, so the coarse globe is hidden exactly under resident detailed
+geometry regardless of globe chunk size or LOD level, and stays visible as
+the fallback surface in every other cell (unloaded cells while the streamer
+catches up, sea, data gaps) — a hole to space cannot exist. ProVPilot feeds
+Scenery3D's **live tile/chunk residency** mask straight into it (one byte
+per 1 km tile around the camera, ~421² cells) whenever a tile or chunk
+appears or disappears or the camera moves. Chunk-level culling by rectangles was the
+previous mechanism and was dropped: a max-level chunk is 130–170 km wide and
+could never be contained inside a ~220 km region rectangle reliably.
 
 | Method | Effect |
 |--------|--------|
-| `clear_suppress_rects()` | drop all rectangles (no-ops the cull) |
-| `add_suppress_rect(x_min, z_min, x_max, z_max)` | add a rectangle (min/max normalised) |
-| `get_suppress_rect_count()` | number of rectangles |
-| `suppresses_flat_point(x, z)` | pure-membership test (for host/tests) |
+| `set_coverage_mask(cells, n, origin_x, origin_z, step_x, step_z)` | replace the mask (`cells` = n×n bytes, row = Z cell, column = X cell) |
+| `clear_coverage_mask()` | no mask — the globe renders everywhere |
+| `get_coverage_mask_size()` | n (0 when no mask) |
+| `suppresses_world_point(x, z)` | CPU mirror of the shader test (for host/tests) |
 
 ### `W3DTangentAnchor` (Node3D)
 
@@ -247,5 +247,5 @@ W3DWorld
   ground vehicles) would need `StaticBody3D` + `ConcavePolygonShape3D` on near
   chunks; not implemented.
 - Still open (polish): T-junction skirts between LOD levels, and frustum
-  culling. The keep-globe-as-backdrop refinement is implemented as the
-  `add_suppress_rect()` API above (per-chunk centre test in the flat frame).
+  culling. The keep-globe-as-backdrop refinement is the `set_coverage_mask()`
+  API above (per-fragment discard in the chunk shader).

@@ -6,7 +6,10 @@
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
-#include <godot_cpp/classes/standard_material3d.hpp>
+#include <godot_cpp/classes/shader_material.hpp>
+#include <godot_cpp/classes/shader.hpp>
+#include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/file_access.hpp>
@@ -50,6 +53,44 @@ namespace world3d
 		}
 	}
 
+	// Chunk material. Vertex colour = elevation ramp (see color_for_elevation);
+	// the coverage mask discards fragments where the host reports resident
+	// detailed geometry (see set_coverage_mask). world_xz is the position in
+	// the globe's parent frame: chunk vertices are float offsets from the
+	// chunk's double-precision centre, and MODEL_MATRIX carries that centre
+	// as a float approximation — sub-metre error at the magnitudes involved,
+	// negligible against multi-km mask cells.
+	static const char *CHUNK_SHADER = R"(
+shader_type spatial;
+render_mode cull_back;
+
+uniform bool mask_enabled = false;
+uniform int mask_size = 0;
+uniform vec2 mask_origin = vec2(0.0, 0.0);
+uniform vec2 mask_step = vec2(1.0, 1.0);
+uniform sampler2D coverage_mask : filter_nearest, repeat_disable;
+
+varying vec2 world_xz;
+
+void vertex() {
+	world_xz = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xz;
+}
+
+void fragment() {
+	if (mask_enabled && mask_size > 0) {
+		vec2 c = (world_xz - mask_origin) / mask_step;
+		if (c.x >= 0.0 && c.y >= 0.0 && c.x < float(mask_size) && c.y < float(mask_size)) {
+			if (texelFetch(coverage_mask, ivec2(int(c.x), int(c.y)), 0).r > 0.5) {
+				discard;
+			}
+		}
+	}
+	ALBEDO = COLOR.rgb;
+	ROUGHNESS = 1.0;
+	METALLIC = 0.0;
+}
+)";
+
 	void W3DGlobe::_bind_methods()
 	{
 		ClassDB::bind_method(D_METHOD("set_faces_path", "path"), &W3DGlobe::set_faces_path);
@@ -76,10 +117,10 @@ namespace world3d
 		ClassDB::bind_method(D_METHOD("get_clamp_sea_level"), &W3DGlobe::get_clamp_sea_level);
 		ADD_PROPERTY(PropertyInfo(Variant::BOOL, "clamp_sea_level"), "set_clamp_sea_level", "get_clamp_sea_level");
 
-		ClassDB::bind_method(D_METHOD("clear_suppress_rects"), &W3DGlobe::clear_suppress_rects);
-		ClassDB::bind_method(D_METHOD("add_suppress_rect", "x_min", "z_min", "x_max", "z_max"), &W3DGlobe::add_suppress_rect);
-		ClassDB::bind_method(D_METHOD("get_suppress_rect_count"), &W3DGlobe::get_suppress_rect_count);
-		ClassDB::bind_method(D_METHOD("suppresses_flat_point", "x", "z"), &W3DGlobe::suppresses_flat_point);
+		ClassDB::bind_method(D_METHOD("set_coverage_mask", "cells", "n", "origin_x", "origin_z", "step_x", "step_z"), &W3DGlobe::set_coverage_mask);
+		ClassDB::bind_method(D_METHOD("clear_coverage_mask"), &W3DGlobe::clear_coverage_mask);
+		ClassDB::bind_method(D_METHOD("get_coverage_mask_size"), &W3DGlobe::get_coverage_mask_size);
+		ClassDB::bind_method(D_METHOD("suppresses_world_point", "x", "z"), &W3DGlobe::suppresses_world_point);
 
 		ClassDB::bind_method(D_METHOD("get_elevation", "latitude", "longitude"), &W3DGlobe::get_elevation);
 		ClassDB::bind_method(D_METHOD("get_ground_ecef", "latitude", "longitude"), &W3DGlobe::get_ground_ecef);
@@ -100,11 +141,11 @@ namespace world3d
 		}
 		build_shared_indices();
 
+		chunk_shader.instantiate();
+		chunk_shader->set_code(CHUNK_SHADER);
 		chunk_material.instantiate();
-		chunk_material->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
-		chunk_material->set_cull_mode(BaseMaterial3D::CULL_BACK);
-		chunk_material->set_roughness(1.0);
-		chunk_material->set_metallic(0.0);
+		chunk_material->set_shader(chunk_shader);
+		push_mask_uniforms();
 
 		start_workers();
 		for (int f = 0; f < 6; ++f)
@@ -149,6 +190,8 @@ namespace world3d
 			roots[f] = nullptr;
 		}
 		chunk_material.unref();
+		chunk_shader.unref();
+		mask_texture.unref();
 	}
 
 	static Color color_for_elevation(float e)
@@ -613,23 +656,9 @@ namespace world3d
 		}
 		const bool want_split = (node->level < max_level) && (dist < node->edge_len * lod_split_factor);
 
-		// Patch suppression (flat-frame XZ rectangles via the mount transform):
-		// regions where a detailed scenery patch is authoritative. to_global()
-		// applies the GlobeMount ECEF->flat transform; only x/z matter — y is
-		// ASL. Tested AFTER the split decision on purpose: a suppressed chunk
-		// near the camera must still subdivide, so only leaf-size pieces are
-		// culled and the culled ground stays inside the host's streaming
-		// coverage (the host clips its rectangles to that coverage). Culling
-		// is containment-based (all four ground corners inside one rectangle),
-		// so a culled chunk always sits fully under resident geometry: no
-		// holes to space, and chunks straddling the coverage edge stay visible
-		// as the fallback surface instead of being hidden by centre alone.
-		bool suppressed = false;
-		if (!suppress_rects.empty())
-		{
-			suppressed = chunk_fully_suppressed(node);
-		}
-
+		// Patch suppression is per fragment (coverage mask in the chunk shader),
+		// so the LOD traversal never culls by region: every visible chunk is
+		// drawn and the shader discards where detailed geometry is resident.
 		if (want_split)
 		{
 			if (!node->has_children)
@@ -649,10 +678,7 @@ namespace world3d
 			}
 			else
 			{
-				// Seamless: keep the parent visible until every child is ready —
-				// even when suppressed (its ground lies inside the host's
-				// coverage square, so a few frames of hidden double-surface
-				// beat a hole).
+				// Seamless: keep the parent visible until every child is ready.
 				if (node->mesh)
 				{
 					node->mesh->set_visible(true);
@@ -667,7 +693,7 @@ namespace world3d
 			}
 			if (node->mesh)
 			{
-				node->mesh->set_visible(!suppressed);
+				node->mesh->set_visible(true);
 			}
 		}
 	}
@@ -709,74 +735,74 @@ namespace world3d
 	void W3DGlobe::set_clamp_sea_level(bool p_clamp) { clamp_sea_level = p_clamp; }
 	bool W3DGlobe::get_clamp_sea_level() const { return clamp_sea_level; }
 
-	void W3DGlobe::clear_suppress_rects()
+	void W3DGlobe::set_coverage_mask(const PackedByteArray &cells, int n,
+		double origin_x, double origin_z, double step_x, double step_z)
 	{
-		suppress_rects.clear();
-	}
-
-	void W3DGlobe::add_suppress_rect(double x_min, double z_min, double x_max, double z_max)
-	{
-		SuppressRect r;
-		r.x0 = MIN(x_min, x_max);
-		r.x1 = MAX(x_min, x_max);
-		r.z0 = MIN(z_min, z_max);
-		r.z1 = MAX(z_min, z_max);
-		suppress_rects.push_back(r);
-	}
-
-	int W3DGlobe::get_suppress_rect_count() const { return (int)suppress_rects.size(); }
-
-	bool W3DGlobe::in_suppress_rects(double x, double z) const
-	{
-		for (const auto &r : suppress_rects)
+		if (n <= 0 || cells.size() != (int64_t)n * n || step_x == 0.0 || step_z == 0.0)
 		{
-			if (x >= r.x0 && x <= r.x1 && z >= r.z0 && z <= r.z1)
-			{
-				return true;
-			}
+			clear_coverage_mask();
+			return;
 		}
-		return false;
+		mask_cells = cells;
+		mask_n = n;
+		mask_origin_x = origin_x;
+		mask_origin_z = origin_z;
+		mask_step_x = step_x;
+		mask_step_z = step_z;
+
+		Ref<Image> img = Image::create_from_data(n, n, false, Image::FORMAT_L8, cells);
+		if (mask_texture.is_valid() && mask_texture->get_width() == n && mask_texture->get_height() == n)
+		{
+			mask_texture->update(img);
+		}
+		else
+		{
+			mask_texture = ImageTexture::create_from_image(img);
+		}
+		push_mask_uniforms();
 	}
 
-	bool W3DGlobe::chunk_fully_suppressed(const QuadNode *node) const
+	void W3DGlobe::clear_coverage_mask()
 	{
-		// Cheap necessary condition first (rectangles are convex: all four
-		// corners inside one of them implies the centre is too).
-		const Vector3 center_flat = to_global(node->center_ecef);
-		if (!in_suppress_rects(center_flat.x, center_flat.z))
+		mask_cells = PackedByteArray();
+		mask_n = 0;
+		push_mask_uniforms();
+	}
+
+	int W3DGlobe::get_coverage_mask_size() const { return mask_n; }
+
+	void W3DGlobe::push_mask_uniforms()
+	{
+		if (!chunk_material.is_valid())
+		{
+			return;
+		}
+		const bool enabled = mask_n > 0 && mask_texture.is_valid();
+		chunk_material->set_shader_parameter("mask_enabled", enabled);
+		chunk_material->set_shader_parameter("mask_size", enabled ? mask_n : 0);
+		chunk_material->set_shader_parameter("mask_origin", Vector2(mask_origin_x, mask_origin_z));
+		chunk_material->set_shader_parameter("mask_step", Vector2(mask_step_x, mask_step_z));
+		if (enabled)
+		{
+			chunk_material->set_shader_parameter("coverage_mask", mask_texture);
+		}
+	}
+
+	bool W3DGlobe::suppresses_world_point(double x, double z) const
+	{
+		if (mask_n <= 0)
 		{
 			return false;
 		}
-		// Containment: every ground corner must lie inside a SINGLE rectangle.
-		// ecef_at() evaluates the surface (incl. elevation) at the face-space
-		// corners; to_global() maps them into the flat frame like the host's
-		// coverage grid. A culled chunk therefore sits fully under resident
-		// geometry — chunks straddling a rectangle edge stay visible.
-		const double us[2] = {node->u0, node->u1};
-		const double vs[2] = {node->v0, node->v1};
-		for (const auto &r : suppress_rects)
+		const double cx = (x - mask_origin_x) / mask_step_x;
+		const double cz = (z - mask_origin_z) / mask_step_z;
+		if (cx < 0.0 || cz < 0.0 || cx >= (double)mask_n || cz >= (double)mask_n)
 		{
-			bool all_inside = true;
-			for (int i = 0; i < 2 && all_inside; ++i)
-			{
-				for (int j = 0; j < 2 && all_inside; ++j)
-				{
-					const Vector3 flat = to_global(ecef_at(node->face, us[i], vs[j]));
-					all_inside = (flat.x >= r.x0 && flat.x <= r.x1 &&
-						flat.z >= r.z0 && flat.z <= r.z1);
-				}
-			}
-			if (all_inside)
-			{
-				return true;
-			}
+			return false;
 		}
-		return false;
-	}
-
-	bool W3DGlobe::suppresses_flat_point(double x, double z) const
-	{
-		return in_suppress_rects(x, z);
+		const int ix = (int)cx;
+		const int iz = (int)cz;
+		return mask_cells[(int64_t)iz * mask_n + ix] != 0;
 	}
 
 	double W3DGlobe::get_elevation(double latitude, double longitude) const

@@ -2,7 +2,10 @@
 #define W3D_GLOBE_H
 
 #include <godot_cpp/classes/node3d.hpp>
-#include <godot_cpp/classes/standard_material3d.hpp>
+#include <godot_cpp/classes/shader_material.hpp>
+#include <godot_cpp/classes/shader.hpp>
+#include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
@@ -94,23 +97,26 @@ namespace world3d
 		QuadNode *roots[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 		bool ready = false;
 
-		// Suppression rectangles in the FLAT frame (XZ metres): regions where
-		// a detailed scenery patch is authoritative, so coarse globe chunks are
-		// culled there instead of rendering a second surface next to / above
-		// the fine patch. The host pushes LIVE coverage rectangles (merged
-		// resident-tile/chunk cells clipped to region extents and inset by a
-		// small margin) whenever the tile manager's coverage changes. Culling
-		// is CONTAINMENT-based: a chunk is culled only when all four ground
-		// corners lie inside one rectangle, so a culled chunk always sits fully
-		// under resident geometry — no holes to space, and chunks straddling
-		// the coverage edge stay visible as the fallback surface.
-		struct SuppressRect { double x0 = 0, z0 = 0, x1 = 0, z1 = 0; };
-		std::vector<SuppressRect> suppress_rects;
+		// Coverage mask: where a detailed scenery patch is RESIDENT, the coarse
+		// globe must not show through. The host uploads one byte per Scenery3D
+		// chunk cell (255 = covered) on a square n×n grid, plus the mapping
+		// from the globe's parent ("world", i.e. the host's flat frame) XZ to
+		// cell coordinates: cell = (world_xz - origin) / step (floor). The
+		// chunk shader discards fragments in covered cells, so suppression is
+		// per FRAGMENT and independent of globe chunk size or LOD level — the
+		// globe ends exactly at the resident-geometry boundary and stays
+		// visible as the fallback surface in unloaded / no-data cells.
+		godot::PackedByteArray mask_cells;
+		int mask_n = 0;
+		double mask_origin_x = 0.0, mask_origin_z = 0.0;
+		double mask_step_x = 1.0, mask_step_z = 1.0;
+		godot::Ref<godot::ImageTexture> mask_texture;
 
 		// Shared triangle topology (identical for every chunk of this resolution).
 		godot::PackedInt32Array shared_indices;
 		// Shared material for every chunk (released in _exit_tree).
-		godot::Ref<godot::StandardMaterial3D> chunk_material;
+		godot::Ref<godot::Shader> chunk_shader;
+		godot::Ref<godot::ShaderMaterial> chunk_material;
 
 		// Background meshing pool.
 		std::vector<std::thread> workers;
@@ -142,10 +148,7 @@ namespace world3d
 		void split(QuadNode *node);
 		bool children_ready(QuadNode *node) const;
 		bool beyond_horizon(const QuadNode *node, const godot::Vector3 &cam_ecef) const;
-		bool in_suppress_rects(double x, double z) const;
-		// Containment test: true when every ground corner of the chunk lies
-		// inside a single suppression rectangle (see SuppressRect).
-		bool chunk_fully_suppressed(const QuadNode *node) const;
+		void push_mask_uniforms();
 		void update_node(QuadNode *node, const godot::Vector3 &cam_ecef);
 
 	protected:
@@ -177,14 +180,18 @@ namespace world3d
 		void set_clamp_sea_level(bool p_clamp);
 		bool get_clamp_sea_level() const;
 
-		// --- Patch suppression (flat-frame XZ rectangles) ---
-		// Chunks whose ECEF centre projects (via the mount transform) inside
-		// any rectangle are culled in the LOD traversal. The host (ProVPilot)
-		// feeds one rectangle per enabled scenery region's terrain extent.
-		void clear_suppress_rects();
-		void add_suppress_rect(double x_min, double z_min, double x_max, double z_max);
-		int get_suppress_rect_count() const;
-		bool suppresses_flat_point(double x, double z) const;
+		// --- Patch suppression (per-fragment coverage mask) ---
+		// cells: n*n bytes, row-major, row = Z cell, column = X cell, nonzero =
+		// covered (detailed geometry resident there). origin/step map the
+		// globe's parent-frame XZ to cell coordinates (step may be negative
+		// when the host's axis runs opposite to the cell index). Replaces the
+		// mask entirely; call again whenever the host's coverage changes.
+		void set_coverage_mask(const godot::PackedByteArray &cells, int n,
+			double origin_x, double origin_z, double step_x, double step_z);
+		void clear_coverage_mask();
+		int get_coverage_mask_size() const;
+		// CPU mirror of the shader test (for the host / smoke tests).
+		bool suppresses_world_point(double x, double z) const;
 
 		// --- Global terrain queries (for flight dynamics / ground contact) ---
 		// All work anywhere on the planet from the in-memory face grids, regardless
