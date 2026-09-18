@@ -94,10 +94,16 @@ namespace world3d
 		QuadNode *roots[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 		bool ready = false;
 
-		// Axis-aligned suppression rectangles in the FLAT frame (XZ metres):
-		// regions where a detailed scenery patch is authoritative, so coarse
-		// globe chunks are culled there instead of rendering a second surface
-		// next to / above the fine patch. Static per session (region bboxes).
+		// Suppression rectangles in the FLAT frame (XZ metres): regions where
+		// a detailed scenery patch is authoritative, so coarse globe chunks are
+		// culled there instead of rendering a second surface next to / above
+		// the fine patch. The host pushes LIVE coverage rectangles (merged
+		// resident-tile/chunk cells clipped to region extents and inset by a
+		// small margin) whenever the tile manager's coverage changes. Culling
+		// is CONTAINMENT-based: a chunk is culled only when all four ground
+		// corners lie inside one rectangle, so a culled chunk always sits fully
+		// under resident geometry — no holes to space, and chunks straddling
+		// the coverage edge stay visible as the fallback surface.
 		struct SuppressRect { double x0 = 0, z0 = 0, x1 = 0, z1 = 0; };
 		std::vector<SuppressRect> suppress_rects;
 
@@ -137,6 +143,9 @@ namespace world3d
 		bool children_ready(QuadNode *node) const;
 		bool beyond_horizon(const QuadNode *node, const godot::Vector3 &cam_ecef) const;
 		bool in_suppress_rects(double x, double z) const;
+		// Containment test: true when every ground corner of the chunk lies
+		// inside a single suppression rectangle (see SuppressRect).
+		bool chunk_fully_suppressed(const QuadNode *node) const;
 		void update_node(QuadNode *node, const godot::Vector3 &cam_ecef);
 
 	protected:

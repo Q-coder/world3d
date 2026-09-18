@@ -591,26 +591,6 @@ namespace world3d
 
 	void W3DGlobe::update_node(QuadNode *node, const Vector3 &cam_ecef)
 	{
-		if (!suppress_rects.empty())
-		{
-			// to_global() applies the GlobeMount ECEF->flat transform. The host
-			// updates the mount in its own _process (parent runs first), so the
-			// test sees the current mapping. Only x/z matter — y is ASL.
-			const Vector3 flat = to_global(node->center_ecef);
-			if (in_suppress_rects(flat.x, flat.z))
-			{
-				if (node->has_children)
-				{
-					collapse(node);
-				}
-				if (node->mesh)
-				{
-					node->mesh->set_visible(false);
-				}
-				return;
-			}
-		}
-
 		if (beyond_horizon(node, cam_ecef))
 		{
 			if (node->has_children)
@@ -633,6 +613,23 @@ namespace world3d
 		}
 		const bool want_split = (node->level < max_level) && (dist < node->edge_len * lod_split_factor);
 
+		// Patch suppression (flat-frame XZ rectangles via the mount transform):
+		// regions where a detailed scenery patch is authoritative. to_global()
+		// applies the GlobeMount ECEF->flat transform; only x/z matter — y is
+		// ASL. Tested AFTER the split decision on purpose: a suppressed chunk
+		// near the camera must still subdivide, so only leaf-size pieces are
+		// culled and the culled ground stays inside the host's streaming
+		// coverage (the host clips its rectangles to that coverage). Culling
+		// is containment-based (all four ground corners inside one rectangle),
+		// so a culled chunk always sits fully under resident geometry: no
+		// holes to space, and chunks straddling the coverage edge stay visible
+		// as the fallback surface instead of being hidden by centre alone.
+		bool suppressed = false;
+		if (!suppress_rects.empty())
+		{
+			suppressed = chunk_fully_suppressed(node);
+		}
+
 		if (want_split)
 		{
 			if (!node->has_children)
@@ -652,7 +649,10 @@ namespace world3d
 			}
 			else
 			{
-				// Seamless: keep the parent visible until every child is ready.
+				// Seamless: keep the parent visible until every child is ready —
+				// even when suppressed (its ground lies inside the host's
+				// coverage square, so a few frames of hidden double-surface
+				// beat a hole).
 				if (node->mesh)
 				{
 					node->mesh->set_visible(true);
@@ -667,7 +667,7 @@ namespace world3d
 			}
 			if (node->mesh)
 			{
-				node->mesh->set_visible(true);
+				node->mesh->set_visible(!suppressed);
 			}
 		}
 	}
@@ -731,6 +731,42 @@ namespace world3d
 		for (const auto &r : suppress_rects)
 		{
 			if (x >= r.x0 && x <= r.x1 && z >= r.z0 && z <= r.z1)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool W3DGlobe::chunk_fully_suppressed(const QuadNode *node) const
+	{
+		// Cheap necessary condition first (rectangles are convex: all four
+		// corners inside one of them implies the centre is too).
+		const Vector3 center_flat = to_global(node->center_ecef);
+		if (!in_suppress_rects(center_flat.x, center_flat.z))
+		{
+			return false;
+		}
+		// Containment: every ground corner must lie inside a SINGLE rectangle.
+		// ecef_at() evaluates the surface (incl. elevation) at the face-space
+		// corners; to_global() maps them into the flat frame like the host's
+		// coverage grid. A culled chunk therefore sits fully under resident
+		// geometry — chunks straddling a rectangle edge stay visible.
+		const double us[2] = {node->u0, node->u1};
+		const double vs[2] = {node->v0, node->v1};
+		for (const auto &r : suppress_rects)
+		{
+			bool all_inside = true;
+			for (int i = 0; i < 2 && all_inside; ++i)
+			{
+				for (int j = 0; j < 2 && all_inside; ++j)
+				{
+					const Vector3 flat = to_global(ecef_at(node->face, us[i], vs[j]));
+					all_inside = (flat.x >= r.x0 && flat.x <= r.x1 &&
+						flat.z >= r.z0 && flat.z <= r.z1);
+				}
+			}
+			if (all_inside)
 			{
 				return true;
 			}

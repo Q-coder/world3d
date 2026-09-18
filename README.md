@@ -131,6 +131,30 @@ face grids, independent of which chunks are meshed):
 | `get_terrain_ecef_below(ecef)` | ECEF surface point directly under an ECEF position |
 | `get_height_above_terrain(ecef)` | height above ground (AGL) in metres |
 
+Patch suppression — axis-aligned rectangles in the **flat frame** (the frame
+the globe is mounted into; XZ metres). A chunk is culled in the LOD traversal
+only when **all four of its ground corners** project (via the mount transform)
+into one rectangle — containment, not centre membership — so a culled chunk
+always sits fully under resident detailed geometry and no large inset is
+needed to avoid holes to space (chunks straddling a rectangle edge stay
+visible). This lets a detailed scenery patch own its footprint while the globe
+stays visible everywhere else. ProVPilot derives the rectangles from
+Scenery3D's **live tile/chunk residency**: the tile manager reports a per-cell
+coverage grid (chunk-aligned, around the camera); covered cells are merged
+into maximal rectangles, clipped to each enabled region's terrain extent and
+inset by a small margin — so the globe is culled only where detailed geometry
+actually exists and stays visible as the fallback while the streamer catches
+up (no holes to space during the intro zoom or after a teleport). Suppressed
+chunks near the camera still subdivide (the test runs after the split
+decision), so only leaf-size pieces are culled:
+
+| Method | Effect |
+|--------|--------|
+| `clear_suppress_rects()` | drop all rectangles (no-ops the cull) |
+| `add_suppress_rect(x_min, z_min, x_max, z_max)` | add a rectangle (min/max normalised) |
+| `get_suppress_rect_count()` | number of rectangles |
+| `suppresses_flat_point(x, z)` | pure-membership test (for host/tests) |
+
 ### `W3DTangentAnchor` (Node3D)
 
 Mounts a flat local patch on the ellipsoid. Properties: `origin_latitude`,
@@ -222,6 +246,6 @@ W3DWorld
   is correct — use the elevation queries. Rigid-body terrain collision (e.g. for
   ground vehicles) would need `StaticBody3D` + `ConcavePolygonShape3D` on near
   chunks; not implemented.
-- Still open (polish): T-junction skirts between LOD levels, frustum culling, and
-  a keep-globe-as-backdrop refinement that suppresses only the near chunks under a
-  patch footprint instead of hiding the whole globe.
+- Still open (polish): T-junction skirts between LOD levels, and frustum
+  culling. The keep-globe-as-backdrop refinement is implemented as the
+  `add_suppress_rect()` API above (per-chunk centre test in the flat frame).
