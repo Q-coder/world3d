@@ -180,27 +180,30 @@ coarse globe while any child anchor is active.
 
 ## Using it in ProVPilot
 
-### Global terrain only (no local patch)
-
-Scene:
+ProVPilot's Godot world **is ECEF** (design §9.5 in its `WORLD_SCENERY_DESIGN.md`):
+the globe sits at the origin (`GlobeMount` = identity), Scenery3D places its
+regional tiles on the ellipsoid (`frame_mode = 1`), and the aircraft node
+carries an ECEF position with a body-to-ECEF basis from JSBSim.
 
 ```
-W3DWorld
-└── W3DGlobe   (faces_path = "res://faces", vertical_exaggeration = 1.0, clamp_sea_level = true)
+node_3d
+├── GlobeMount (identity)
+│   └── W3DGlobe            (faces_path = "res://faces", coverage mask frame 1)
+├── Scenery3D (frame_mode 1)
+└── AC                      (ECEF pose; cameras as children)
 ```
 
-Place the aircraft/camera directly in ECEF world coordinates:
+Place anything at a geodetic point with `W3DCoords`:
 
 ```gdscript
-# Spawn at a geodetic point (metres above the ellipsoid):
 aircraft.global_position = W3DCoords.geodetic_to_ecef(lat, lon, altitude_m)
-
-# A local Y-up frame at that point (+X East, +Y Up, +Z South) for orientation:
-var frame := W3DCoords.enu_to_ecef_transform(lat, lon, altitude_m, false)
+# Local West-Up-North frame there (scenery3d convention):
+var wun := W3DCoords.enu_to_ecef_transform(lat, lon, altitude_m, true)
 ```
 
-Double precision keeps positions stable at ~6.4 M m; no floating-origin rebasing
-is needed.
+Double precision keeps positions stable at ~6.4 M m; no floating-origin
+rebasing is needed. Do not use `Node3D.look_at()` / `is_equal_approx()` on
+world positions: their relative epsilon is ~64 m at these magnitudes.
 
 ### Ground contact / collision
 
@@ -211,34 +214,20 @@ shapes. Each tick:
 ```gdscript
 var agl    := globe.get_height_above_terrain(aircraft.global_position)  # AGL metres
 var ground := globe.get_terrain_ecef_below(aircraft.global_position)    # ECEF under you
-
-# gear/ground contact:
-if agl <= wheel_offset:
-    # on the ground — clamp to `ground`, apply reaction, etc.
-    pass
-
-# "down" (gravity direction) points toward Earth centre:
-var down := -aircraft.global_position.normalized()
 ```
 
 `get_elevation` / `get_height_above_terrain` are O(1), thread-safe, and cover the
 whole planet regardless of which LOD chunks are currently loaded — so they are
-safe to call from the physics thread.
+safe to call from the physics thread. ProVPilot prefers the Scenery3D value
+where a region is resident and falls back to the globe elsewhere.
 
-### Mounting the Swiss / Baden-Württemberg patch (later)
+### Hiding the globe under regional scenery
 
-Parent a `Scenery3D` node under a `W3DTangentAnchor`; its LV95 tiles land tangent
-on the globe at the anchor's geodetic origin (default the Bern LV95 fundamental
-point). `W3DWorld` hides the coarse globe while the patch is active (within
-`active_radius`); set `hide_globe_when_local = false` to keep the globe as a
-backdrop instead.
-
-```
-W3DWorld
-├── W3DGlobe
-└── W3DTangentAnchor  (origin_latitude/longitude, active_radius, x_axis_west = true)
-    └── Scenery3D     (the existing LV95 tile system)
-```
+The host uploads Scenery3D's live tile-resolution coverage mask
+(`set_coverage_mask`, mask frame 1 = LV95 grid metres); the chunk shader
+projects each fragment ECEF → LV95 and discards it where detailed geometry is
+resident, so the globe is the fallback surface everywhere else.
+`W3DTangentAnchor` / `W3DWorld` remain for hosts that mount a flat patch.
 
 ## Notes and limitations
 
